@@ -119,16 +119,33 @@ input[type=range]{width:100%; accent-color:var(--accent);}
       <div class="field"><label>角色名称</label><input type="text" id="s-char-name" placeholder="例如：小夜"></div>
       <div class="field"><label>角色设定 / 人设</label><textarea id="s-char-persona" placeholder="描述性格、说话风格、背景故事…"></textarea></div>
 
-      <div class="section-title">API 配置</div>
-      <div class="field"><label>服务商</label>
-        <select id="s-provider">
-          <option value="gemini">Google Gemini 官方 API</option>
-          <option value="openrouter">OpenRouter</option>
-        </select>
+      <div class="section-title">API 配置（可保存多组，随时切换）</div>
+      <div class="field"><label>当前使用的配置</label>
+        <select id="s-profile-select"></select>
+      </div>
+      <div class="row">
+        <div class="field"><label>配置名称</label><input type="text" id="s-profile-name" placeholder="如"Gemini官方""></div>
+        <div class="field"><label>服务商</label>
+          <select id="s-provider">
+            <option value="gemini">Google Gemini 官方 API</option>
+            <option value="openrouter">OpenRouter</option>
+            <option value="deepseek">DeepSeek 官方 API</option>
+          </select>
+        </div>
       </div>
       <div class="field"><label>API Key</label><input type="password" id="s-key" placeholder="粘贴你的 API Key"></div>
-      <div class="field"><label>模型名称</label><input type="text" id="s-model" placeholder="如 gemini-2.0-flash 或 openai/gpt-4o-mini"></div>
-      <div class="hint">Key 只保存在本机浏览器 localStorage 中，不会上传到任何服务器。</div>
+      <div class="field"><label>模型</label>
+        <select id="s-model"></select>
+      </div>
+      <div class="field" id="s-model-custom-wrap" style="display:none;">
+        <label>自定义模型 ID</label>
+        <input type="text" id="s-model-custom" placeholder="例如 google/gemini-2.5-flash">
+      </div>
+      <div class="btn-row">
+        <button class="btn" id="btn-profile-new">另存为新配置</button>
+        <button class="btn" id="btn-profile-delete">删除当前配置</button>
+      </div>
+      <div class="hint">Key 只保存在本机浏览器里。"当前使用的配置"决定发消息用哪一组；改完信息后点最下面的"保存设置"会更新这一组。</div>
 
       <div class="section-title">主动聊天</div>
       <div class="switch-row"><span>开启主动聊天</span>
@@ -142,6 +159,10 @@ input[type=range]{width:100%; accent-color:var(--accent);}
         <input type="range" id="s-prob" min="0" max="100" value="40">
       </div>
       <div class="hint">到时间后会先让 AI 自行判断"现在有没有自然的话想说"，不是机械发消息；没有就跳过。仅在本页面保持打开时生效，锁屏或退到后台后计时会暂停。</div>
+
+      <div class="section-title">角色日记</div>
+      <div class="field"><label>自动生成间隔（天）</label><input type="text" inputmode="numeric" id="s-diary-days" value="2"></div>
+      <div class="hint">每隔这么多天，角色会结合最近的聊天自动写一篇简短日记；日记页也能随时手动点"现在写一篇日记"。仅在页面开着时才会检查，不保证准点。</div>
 
       <div class="section-title">数据</div>
       <div class="btn-row">
@@ -166,8 +187,7 @@ input[type=range]{width:100%; accent-color:var(--accent);}
   </div>
 
   <div class="diary-add" id="diary-add" style="display:none;">
-    <textarea id="diary-input" rows="1" placeholder="今天想记点什么…"></textarea>
-    <button id="diary-save">记录</button>
+    <button id="diary-gen-now" style="flex:1;padding:12px;">现在写一篇日记</button>
   </div>
 
   <nav class="tabbar">
@@ -179,12 +199,25 @@ input[type=range]{width:100%; accent-color:var(--accent);}
 
 <script>
 const K = 'xinyu_v1';
-const state = JSON.parse(localStorage.getItem(K) || 'null') || {
+let state = JSON.parse(localStorage.getItem(K) || 'null') || {
   char:{name:'', persona:''},
-  cfg:{provider:'gemini', key:'', model:''},
+  profiles:[], activeId:'',
   proactive:{on:false, min:30, max:90, prob:40},
+  diarySettings:{days:2, lastGenTs:0},
   messages:[], diary:[]
 };
+if(!state.diarySettings) state.diarySettings = {days:2, lastGenTs:0};
+// 兼容旧版单配置数据，自动迁移成"配置列表"
+if(!state.profiles || state.profiles.length === 0){
+  const old = state.cfg || {provider:'gemini', key:'', model:''};
+  const id = 'p'+Date.now();
+  state.profiles = [{id, name:'默认配置', provider:old.provider, key:old.key, model:old.model}];
+  state.activeId = id;
+  delete state.cfg;
+}
+function getActiveProfile(){
+  return state.profiles.find(p=>p.id===state.activeId) || state.profiles[0] || null;
+}
 function save(){ localStorage.setItem(K, JSON.stringify(state)); }
 
 // ---- header ----
@@ -225,14 +258,18 @@ function pushMsg(role, content, proactive){
 }
 
 // ---- API ----
-async function callModel(history, judgeMode){
+async function callModel(history, mode){
+  const profile = getActiveProfile();
   const persona = state.char.persona || '你是一个友好的聊天伙伴。';
-  const sys = judgeMode
-    ? persona + '\n\n现在请你判断：结合最近的对话，你现在有没有一句很自然、不刻意的话想主动说？如果没有，只回复 NOPE 这四个字母，不要有任何其他内容。如果有，直接用角色口吻说出那句话，不要加任何解释或前缀。'
-    : persona;
-  if(state.cfg.provider === 'gemini'){
+  let sys = persona;
+  if(mode === 'judge'){
+    sys = persona + '\n\n现在请你判断：结合最近的对话，你现在有没有一句很自然、不刻意的话想主动说？如果没有，只回复 NOPE 这四个字母，不要有任何其他内容。如果有，直接用角色口吻说出那句话，不要加任何解释或前缀。';
+  } else if(mode === 'diary'){
+    sys = persona + '\n\n请你以自己的口吻，写一篇简短的日记（100~200字左右），记录这段时间的心情、想法或发生的事，可以参考下面提供的最近聊天内容作为背景，但日记本身是你自己的私人记录，不是对我说的话，不要出现"亲爱的日记"之类的称呼。直接给出日记正文，不要加日期、不要加"日记"两个字的标题。';
+  }
+  if(profile.provider === 'gemini'){
     const contents = history.map(m=>({role: m.role==='user'?'user':'model', parts:[{text:m.content}]}));
-    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(state.cfg.model)}:generateContent?key=${encodeURIComponent(state.cfg.key)}`,{
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(profile.model)}:generateContent?key=${encodeURIComponent(profile.key)}`,{
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({contents, systemInstruction:{parts:[{text:sys}]}})
     });
@@ -240,14 +277,18 @@ async function callModel(history, judgeMode){
     if(!res.ok) throw new Error(data.error?.message || ('Gemini 请求失败 '+res.status));
     return data.candidates?.[0]?.content?.parts?.map(p=>p.text).join('') || '';
   } else {
+    // openrouter / deepseek 都是 OpenAI 兼容格式，只是地址不同
+    const url = profile.provider === 'deepseek'
+      ? 'https://api.deepseek.com/chat/completions'
+      : 'https://openrouter.ai/api/v1/chat/completions';
     const messages = [{role:'system', content:sys}, ...history.map(m=>({role:m.role==='user'?'user':'assistant', content:m.content}))];
-    const res = await fetch('https://openrouter.ai/api/v1/chat/completions',{
+    const res = await fetch(url,{
       method:'POST',
-      headers:{'Content-Type':'application/json','Authorization':'Bearer '+state.cfg.key},
-      body: JSON.stringify({model: state.cfg.model, messages})
+      headers:{'Content-Type':'application/json','Authorization':'Bearer '+profile.key},
+      body: JSON.stringify({model: profile.model, messages})
     });
     const data = await res.json();
-    if(!res.ok) throw new Error(data.error?.message || ('OpenRouter 请求失败 '+res.status));
+    if(!res.ok) throw new Error(data.error?.message || ('请求失败 '+res.status));
     return data.choices?.[0]?.message?.content || '';
   }
 }
@@ -257,7 +298,8 @@ async function sendCurrent(){
   const inp = document.getElementById('input');
   const text = inp.value.trim();
   if(!text || sending) return;
-  if(!state.cfg.key || !state.cfg.model){ alert('请先去设置里填写 API Key 和模型名称'); return; }
+  const profile = getActiveProfile();
+  if(!profile || !profile.key || !profile.model){ alert('请先去设置里选好一组配置，并填写 API Key 和模型'); return; }
   inp.value=''; inp.style.height='auto';
   pushMsg('user', text);
   sending = true;
@@ -291,26 +333,116 @@ function renderDiary(){
     el.appendChild(ts); el.appendChild(tx); diaryList.appendChild(el);
   });
 }
-document.getElementById('diary-save').onclick = ()=>{
-  const ta = document.getElementById('diary-input');
-  const t = ta.value.trim();
-  if(!t) return;
-  state.diary.push({ts:Date.now(), text:t});
-  save(); ta.value=''; renderDiary();
-};
+document.getElementById('diary-gen-now').onclick = ()=> generateDiaryNow(true);
 
 // ---- settings ----
+const MODEL_LISTS = {
+  gemini: [
+    ['gemini-2.5-flash-lite','Gemini 2.5 Flash-Lite（最省钱）'],
+    ['gemini-2.5-flash','Gemini 2.5 Flash（性价比均衡）'],
+    ['gemini-2.5-pro','Gemini 2.5 Pro（效果最好，较贵）'],
+    ['gemini-3.1-flash-lite','Gemini 3.1 Flash-Lite（新款，便宜）']
+  ],
+  openrouter: {
+    'Gemini（通过 OpenRouter）': [
+      ['google/gemini-2.5-flash-lite','Gemini 2.5 Flash-Lite（最省钱）'],
+      ['google/gemini-2.5-flash','Gemini 2.5 Flash（性价比均衡）'],
+      ['google/gemini-2.5-pro','Gemini 2.5 Pro（效果最好，较贵）'],
+      ['google/gemini-3-flash-preview','Gemini 3 Flash Preview（新一代，速度快）']
+    ],
+    'Grok（通过 OpenRouter）': [
+      ['x-ai/grok-4.1-fast','Grok 4.1 Fast（响应快，大上下文）'],
+      ['x-ai/grok-4.20','Grok 4.20（更强，速度快，较贵）']
+    ]
+  },
+  deepseek: [
+    ['deepseek-v4-flash','DeepSeek V4 Flash（性价比高，官方）'],
+    ['deepseek-v4-pro','DeepSeek V4 Pro（更强，更贵，官方）']
+  ]
+};
+function populateModelSelect(selected){
+  const sel = document.getElementById('s-model');
+  const provider = document.getElementById('s-provider').value;
+  sel.innerHTML = '';
+  const addOpt = (v,l)=>{ const o=document.createElement('option'); o.value=v; o.textContent=l; sel.appendChild(o); };
+  let known = [];
+  if(provider === 'openrouter'){
+    Object.entries(MODEL_LISTS.openrouter).forEach(([group, list])=>{
+      const og = document.createElement('optgroup'); og.label = group;
+      list.forEach(([v,l])=>{ const o=document.createElement('option'); o.value=v; o.textContent=l; og.appendChild(o); known.push(v); });
+      sel.appendChild(og);
+    });
+  } else {
+    (MODEL_LISTS[provider]||[]).forEach(([v,l])=>{addOpt(v,l); known.push(v);});
+  }
+  addOpt('__custom__','自定义…（手动填 ID）');
+  const wrap = document.getElementById('s-model-custom-wrap');
+  if(selected && known.includes(selected)){
+    sel.value = selected; wrap.style.display = 'none';
+  } else if(selected){
+    sel.value = '__custom__'; wrap.style.display = 'block';
+    document.getElementById('s-model-custom').value = selected;
+  } else {
+    sel.value = known[0] || '__custom__'; wrap.style.display = sel.value==='__custom__' ? 'block':'none';
+  }
+}
+document.getElementById('s-provider').addEventListener('change', ()=> populateModelSelect());
+document.getElementById('s-model').addEventListener('change', function(){
+  document.getElementById('s-model-custom-wrap').style.display = this.value==='__custom__' ? 'block':'none';
+});
+
+// ---- 多组 API 配置 ----
+function populateProfileSelect(){
+  const sel = document.getElementById('s-profile-select');
+  sel.innerHTML = '';
+  state.profiles.forEach(p=>{
+    const o = document.createElement('option'); o.value = p.id; o.textContent = p.name || '未命名配置';
+    sel.appendChild(o);
+  });
+  sel.value = state.activeId;
+}
+function loadProfileIntoEditor(p){
+  document.getElementById('s-profile-name').value = p ? p.name : '';
+  document.getElementById('s-provider').value = p ? p.provider : 'gemini';
+  document.getElementById('s-key').value = p ? p.key : '';
+  populateModelSelect(p ? p.model : '');
+}
+document.getElementById('s-profile-select').addEventListener('change', function(){
+  state.activeId = this.value;
+  save();
+  loadProfileIntoEditor(getActiveProfile());
+});
+document.getElementById('btn-profile-new').onclick = ()=>{
+  const name = document.getElementById('s-profile-name').value.trim() || ('配置'+(state.profiles.length+1));
+  const provider = document.getElementById('s-provider').value;
+  const key = document.getElementById('s-key').value.trim();
+  const modelSel = document.getElementById('s-model').value;
+  const model = modelSel === '__custom__' ? document.getElementById('s-model-custom').value.trim() : modelSel;
+  const id = 'p'+Date.now();
+  state.profiles.push({id, name, provider, key, model});
+  state.activeId = id;
+  save(); populateProfileSelect(); loadProfileIntoEditor(getActiveProfile());
+  alert('已新增并切换到「'+name+'」');
+};
+document.getElementById('btn-profile-delete').onclick = ()=>{
+  if(state.profiles.length <= 1){ alert('至少要保留一组配置'); return; }
+  if(!confirm('确定删除当前这组配置？')) return;
+  state.profiles = state.profiles.filter(p=>p.id !== state.activeId);
+  state.activeId = state.profiles[0].id;
+  save(); populateProfileSelect(); loadProfileIntoEditor(getActiveProfile());
+};
+
 function fillSettings(){
   document.getElementById('s-char-name').value = state.char.name;
   document.getElementById('s-char-persona').value = state.char.persona;
-  document.getElementById('s-provider').value = state.cfg.provider;
-  document.getElementById('s-key').value = state.cfg.key;
-  document.getElementById('s-model').value = state.cfg.model;
+  populateProfileSelect();
+  loadProfileIntoEditor(getActiveProfile());
   document.getElementById('s-proactive-on').checked = state.proactive.on;
   document.getElementById('s-min').value = state.proactive.min;
   document.getElementById('s-max').value = state.proactive.max;
   document.getElementById('s-prob').value = state.proactive.prob;
   document.getElementById('s-prob-val').textContent = state.proactive.prob + '%';
+  document.getElementById('s-diary-days').value = state.diarySettings.days;
 }
 document.getElementById('s-prob').addEventListener('input', function(){
   document.getElementById('s-prob-val').textContent = this.value + '%';
@@ -318,14 +450,21 @@ document.getElementById('s-prob').addEventListener('input', function(){
 document.getElementById('btn-save').onclick = ()=>{
   state.char.name = document.getElementById('s-char-name').value.trim();
   state.char.persona = document.getElementById('s-char-persona').value.trim();
-  state.cfg.provider = document.getElementById('s-provider').value;
-  state.cfg.key = document.getElementById('s-key').value.trim();
-  state.cfg.model = document.getElementById('s-model').value.trim();
+  // 更新当前这组配置
+  const active = getActiveProfile();
+  if(active){
+    active.name = document.getElementById('s-profile-name').value.trim() || active.name;
+    active.provider = document.getElementById('s-provider').value;
+    active.key = document.getElementById('s-key').value.trim();
+    const modelSel = document.getElementById('s-model').value;
+    active.model = modelSel === '__custom__' ? document.getElementById('s-model-custom').value.trim() : modelSel;
+  }
   state.proactive.on = document.getElementById('s-proactive-on').checked;
   state.proactive.min = Math.max(1, parseInt(document.getElementById('s-min').value)||30);
   state.proactive.max = Math.max(state.proactive.min, parseInt(document.getElementById('s-max').value)||90);
   state.proactive.prob = parseInt(document.getElementById('s-prob').value);
-  save(); refreshHeader();
+  state.diarySettings.days = Math.max(1, parseInt(document.getElementById('s-diary-days').value)||2);
+  save(); refreshHeader(); populateProfileSelect();
   if(state.proactive.on && 'Notification' in window && Notification.permission==='default'){ Notification.requestPermission(); }
   scheduleProactive();
   alert('已保存');
@@ -376,6 +515,36 @@ document.getElementById('file-import-txt').addEventListener('change', function()
   reader.readAsText(file, 'UTF-8');
 });
 
+// ---- 角色日记（自动生成） ----
+let generatingDiary = false;
+async function generateDiaryNow(manual){
+  if(generatingDiary) return;
+  const profile = getActiveProfile();
+  if(!profile || !profile.key || !profile.model){
+    if(manual) alert('请先在设置里选好一组配置，并填写 API Key 和模型');
+    return;
+  }
+  generatingDiary = true;
+  try{
+    const text = await callModel(state.messages.slice(-30), 'diary');
+    if(text && text.trim()){
+      state.diary.push({ts:Date.now(), text:text.trim()});
+      state.diarySettings.lastGenTs = Date.now();
+      save(); renderDiary();
+    }
+  }catch(e){
+    if(manual) alert('写日记失败：'+e.message);
+  }finally{
+    generatingDiary = false;
+  }
+}
+function checkAutoDiary(){
+  const days = state.diarySettings.days || 2;
+  const last = state.diarySettings.lastGenTs || 0;
+  const elapsedDays = (Date.now() - last) / 86400000;
+  if(elapsedDays >= days){ generateDiaryNow(false); }
+}
+
 // ---- proactive chat ----
 let proactiveTimer = null;
 function scheduleProactive(){
@@ -387,8 +556,9 @@ function scheduleProactive(){
 }
 async function fireProactive(){
   try{
-    if(state.proactive.on && state.cfg.key && state.cfg.model && Math.random()*100 < state.proactive.prob){
-      const reply = await callModel(state.messages.slice(-20), true);
+    const profile = getActiveProfile();
+    if(state.proactive.on && profile && profile.key && profile.model && Math.random()*100 < state.proactive.prob){
+      const reply = await callModel(state.messages.slice(-20), 'judge');
       if(reply && reply.trim().toUpperCase() !== 'NOPE'){
         pushMsg('assistant', reply.trim(), true);
         if('Notification' in window && Notification.permission==='granted'){
@@ -402,6 +572,8 @@ async function fireProactive(){
 
 // ---- init ----
 refreshHeader(); renderMsgs(); renderDiary(); fillSettings(); scheduleProactive();
+checkAutoDiary();
+setInterval(checkAutoDiary, 3600000);
 </script>
 </body>
 </html>
