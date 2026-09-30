@@ -3,10 +3,10 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no">
-<title>心语</title>
+<title>HeartTouch</title>
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="心语">
+<meta name="apple-mobile-web-app-title" content="HeartTouch">
 <link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%2315131A'/%3E%3Ctext x='50' y='66' font-size='52' text-anchor='middle' fill='%23E3A65A'%3E%E5%BF%83%3C/text%3E%3C/svg%3E">
 <style>
 :root{
@@ -412,7 +412,17 @@ document.getElementById('s-profile-select').addEventListener('change', function(
   save();
   loadProfileIntoEditor(getActiveProfile());
 });
+function saveCommonFields(){
+  state.char.name = document.getElementById('s-char-name').value.trim();
+  state.char.persona = document.getElementById('s-char-persona').value.trim();
+  state.proactive.on = document.getElementById('s-proactive-on').checked;
+  state.proactive.min = Math.max(1, parseInt(document.getElementById('s-min').value)||30);
+  state.proactive.max = Math.max(state.proactive.min, parseInt(document.getElementById('s-max').value)||90);
+  state.proactive.prob = parseInt(document.getElementById('s-prob').value);
+  state.diarySettings.days = Math.max(1, parseInt(document.getElementById('s-diary-days').value)||2);
+}
 document.getElementById('btn-profile-new').onclick = ()=>{
+  saveCommonFields(); // 顺手把角色名/人设/主动聊天/日记设置也存了，不用担心漏存
   const name = document.getElementById('s-profile-name').value.trim() || ('配置'+(state.profiles.length+1));
   const provider = document.getElementById('s-provider').value;
   const key = document.getElementById('s-key').value.trim();
@@ -421,8 +431,8 @@ document.getElementById('btn-profile-new').onclick = ()=>{
   const id = 'p'+Date.now();
   state.profiles.push({id, name, provider, key, model});
   state.activeId = id;
-  save(); populateProfileSelect(); loadProfileIntoEditor(getActiveProfile());
-  alert('已新增并切换到「'+name+'」');
+  save(); populateProfileSelect(); loadProfileIntoEditor(getActiveProfile()); refreshHeader();
+  alert('已新增并切换到「'+name+'」，角色设定也一并保存了');
 };
 document.getElementById('btn-profile-delete').onclick = ()=>{
   if(state.profiles.length <= 1){ alert('至少要保留一组配置'); return; }
@@ -448,8 +458,7 @@ document.getElementById('s-prob').addEventListener('input', function(){
   document.getElementById('s-prob-val').textContent = this.value + '%';
 });
 document.getElementById('btn-save').onclick = ()=>{
-  state.char.name = document.getElementById('s-char-name').value.trim();
-  state.char.persona = document.getElementById('s-char-persona').value.trim();
+  saveCommonFields();
   // 更新当前这组配置
   const active = getActiveProfile();
   if(active){
@@ -459,11 +468,6 @@ document.getElementById('btn-save').onclick = ()=>{
     const modelSel = document.getElementById('s-model').value;
     active.model = modelSel === '__custom__' ? document.getElementById('s-model-custom').value.trim() : modelSel;
   }
-  state.proactive.on = document.getElementById('s-proactive-on').checked;
-  state.proactive.min = Math.max(1, parseInt(document.getElementById('s-min').value)||30);
-  state.proactive.max = Math.max(state.proactive.min, parseInt(document.getElementById('s-max').value)||90);
-  state.proactive.prob = parseInt(document.getElementById('s-prob').value);
-  state.diarySettings.days = Math.max(1, parseInt(document.getElementById('s-diary-days').value)||2);
   save(); refreshHeader(); populateProfileSelect();
   if(state.proactive.on && 'Notification' in window && Notification.permission==='default'){ Notification.requestPermission(); }
   scheduleProactive();
